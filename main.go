@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -28,14 +29,44 @@ func rechunkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var reChunkFile string
-	err = json.Unmarshal(b, &reChunkFile)
+	if err := json.Unmarshal(b, &reChunkFile); err != nil {
+		http.Error(w, "error body text not a string", http.StatusBadRequest)
+		return
+	}
+
+	f, err := os.Open(reChunkFile)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("error body text not a string"))
+		http.Error(w, "failed to open file", http.StatusNotFound)
+		fmt.Println("err here: ", err.Error())
+		return
+	}
+	defer f.Close()
+
+	contentBytes, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, "failed to read file", http.StatusInternalServerError)
+		return
+	}
+	contentStr := string(contentBytes)
+
+	// chunk the content of the file
+	chunks := simpleChunkDocument(reChunkFile, contentStr, 2)
+	fmt.Println(chunks)
+
+	result := struct {
+		Chunks []Chunk
+	}{
+		chunks,
+	}
+
+	resStr, err := json.Marshal(result)
+	if err != nil {
+		http.Error(w, "failed to marshall response", http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("received bytes: " + string(len(b))))
+	w.Write(resStr)
 }
 
 func main() {
