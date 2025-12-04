@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -106,6 +106,12 @@ func rechunkHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	var err error
+	currentConfig, err = Load()
+	if err != nil {
+		return
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/upload", requirePost(uploadHandler))   // POST
 	mux.HandleFunc("/prompt", requirePost(promptHandler))   // POST
@@ -201,58 +207,23 @@ type Embedder interface {
 }
 
 func NewEmbedderFromEnv() (Embedder, error) {
-	if base := strings.TrimSpace(os.Getenv("TEI_URL")); base != "" {
-		return &teiEmbedder{
-			baseURL: strings.TrimRight(base, "/"),
-			token:   os.Getenv("TEI_API_TOKEN"),
-			client:  &http.Client{Timeout: 60 * time.Second},
-			batch:   getBatchSize(),
-		}, nil
+	if currentConfig.HFAPIKey == "" {
+		return nil, fmt.Errorf("missing HF_API_KEY in config")
 	}
-	token := os.Getenv("HUGGINGFACE_API_TOKEN")
-	if token == "" {
-		return nil, errors.New("HUGGINGFACE_API_TOKEN not set (or set TEI_URL to use TEI)")
-	}
-	model := os.Getenv("HUGGINGFACE_MODEL")
+	model := currentConfig.EmbedModelName
 	if model == "" {
 		model = "sentence-transformers/all-MiniLM-L6-v2"
 	}
-	pooling := os.Getenv("HUGGINGFACE_POOLING")
-	if pooling == "" {
-		pooling = "mean"
-	}
-	normalize := parseBoolDefault(os.Getenv("HUGGINGFACE_NORMALIZE"), true)
-	wait := parseBoolDefault(os.Getenv("HUGGINGFACE_WAIT_FOR_MODEL"), true)
 
 	return &hfEmbedder{
 		client:    &http.Client{Timeout: 60 * time.Second},
-		token:     token,
-		model:     model,
-		pooling:   pooling,
-		normalize: normalize,
-		wait:      wait,
-		batch:     getBatchSize(),
+		token:     currentConfig.HFAPIKey, // HF_API_KEY
+		model:     model,                  // EMBED_MODEL_NAME
+		pooling:   "mean",
+		normalize: true,
+		wait:      true,
+		batch:     64, // fixed default; adjust if you later add a config field
 	}, nil
-}
-
-func getBatchSize() int {
-	if v := os.Getenv("EMBEDDING_BATCH_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 64
-}
-
-func parseBoolDefault(s string, def bool) bool {
-	if s == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(s)
-	if err != nil {
-		return def
-	}
-	return b
 }
 
 // -------------------- Hugging Face Inference API --------------------
@@ -273,15 +244,19 @@ func (h *hfEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]fl
 
 	// Endpoint (feature-extraction pipeline with pooling & normalization)
 	// https://api-inference.huggingface.co/pipeline/feature-extraction/{model}?pooling=mean&normalize=true
-	base := "https://api-inference.huggingface.co/pipeline/feature-extraction/"
-	url := fmt.Sprintf("%s%s?pooling=%s&normalize=%t&wait_for_model=%t",
-		base, h.model, h.pooling, h.normalize, h.wait)
+	base := "https://router.huggingface.co/hf-inference/models/"
+	url := fmt.Sprintf("%s%s/pipeline/feature-extraction", base, h.model)
 
 	type reqBody struct {
-		Inputs []string `json:"inputs"`
+		Inputs     []string               `json:"inputs"`
+		Parameters map[string]interface{} `json:"parameters,omitempty"`
 	}
-	// Response with pooling returns [][]float (one vector per input).
-	var resBody [][]float32
+	type resBody [][]float32
+
+	params := map[string]interface{}{
+		"pooling":   h.pooling,   // "mean" | "max"
+		"normalize": h.normalize, // true | false
+	}
 
 	for i := 0; i < len(chunks); i += h.batch {
 		j := i + h.batch
@@ -294,8 +269,8 @@ func (h *hfEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]fl
 		for k, c := range batch {
 			inputs[k] = c.Text
 		}
-		payload, _ := json.Marshal(reqBody{Inputs: inputs})
 
+		payload, _ := json.Marshal(reqBody{Inputs: inputs, Parameters: params})
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+h.token)
@@ -304,6 +279,7 @@ func (h *hfEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]fl
 		if err != nil {
 			return nil, err
 		}
+		var rb resBody
 		func() {
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
@@ -312,22 +288,18 @@ func (h *hfEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]fl
 				err = fmt.Errorf("HF API non-200: %d: %s", resp.StatusCode, dbg.String())
 				return
 			}
-			dec := json.NewDecoder(resp.Body)
-			// When pooling=mean, the API returns a 2D array. Without pooling it returns 3D (tokens).
-			if err = dec.Decode(&resBody); err != nil {
-				return
-			}
+			err = json.NewDecoder(resp.Body).Decode(&rb)
 		}()
 		if err != nil {
 			return nil, err
 		}
-		if len(resBody) != len(batch) {
-			return nil, fmt.Errorf("HF API embeddings count mismatch: have %d want %d", len(resBody), len(batch))
+		if len(rb) != len(batch) {
+			return nil, fmt.Errorf("embeddings count mismatch")
 		}
+
 		for k, c := range batch {
-			// Copy to avoid re-use of backing array across iterations
-			vec := make([]float32, len(resBody[k]))
-			copy(vec, resBody[k])
+			vec := make([]float32, len(rb[k]))
+			copy(vec, rb[k])
 			out[c.ID] = vec
 		}
 	}
@@ -359,6 +331,9 @@ func (t *teiEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]f
 	url := t.baseURL + "/embed"
 
 	for i := 0; i < len(chunks); i += t.batch {
+		if i > 1 {
+			break
+		}
 		j := i + t.batch
 		if j > len(chunks) {
 			j = len(chunks)
@@ -405,4 +380,102 @@ func (t *teiEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]f
 		}
 	}
 	return out, nil
+}
+
+//------
+//loading env var
+
+type Config struct {
+	HFAPIKey       string // HF_API_KEY (required)
+	EmbedModelName string // EMBED_MODEL_NAME
+	GeminiAPIKey   string // GEMINI_API_KEY
+	LLMModelName   string // LLM_MODEL_NAME
+	ChromaDBHost   string // CHROMA_DB_HOST
+	RAGDataDir     string // RAG_DATA_DIR
+	ChunkLength    int    // CHUNK_LENGTH
+	Port           int    // PORT
+}
+
+var currentConfig Config
+
+// Load loads .env-style files then reads process env.
+// In production, prefer real environment variables and skip files.
+func Load() (Config, error) {
+	// Soft-load these files if present (order: base -> local overrides)
+	_ = loadDotEnv(".env")
+	_ = loadDotEnv(".env.local")
+
+	cfg := Config{
+		HFAPIKey:       os.Getenv("HF_API_KEY"),
+		EmbedModelName: getEnvOr("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"),
+		GeminiAPIKey:   os.Getenv("GEMINI_API_KEY"),
+		LLMModelName:   getEnvOr("LLM_MODEL_NAME", "gemini-2.5-flash"),
+		ChromaDBHost:   getEnvOr("CHROMA_DB_HOST", "http://localhost:8000"),
+		RAGDataDir:     getEnvOr("RAG_DATA_DIR", "./data"),
+		ChunkLength:    getIntOr("CHUNK_LENGTH", 800),
+		Port:           getIntOr("PORT", 8080),
+	}
+	if cfg.HFAPIKey == "" {
+		return cfg, fmt.Errorf("missing required env: HF_API_KEY")
+	}
+	return cfg, nil
+}
+
+func loadDotEnv(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err // ignore upstream
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Support "export KEY=VALUE"
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export"))
+		}
+		// Split on first '='
+		i := strings.IndexByte(line, '=')
+		if i <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:i])
+		val := strings.TrimSpace(line[i+1:])
+		// Strip surrounding quotes if present
+		val = stripQuotes(val)
+		// Do not overwrite if already set in environment
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
+	return sc.Err()
+}
+
+func stripQuotes(v string) string {
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = v[1 : len(v)-1]
+		}
+	}
+	return v
+}
+
+func getEnvOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+func getIntOr(key string, def int) int {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
