@@ -39,6 +39,12 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		} /* handle */
 	}
+
+	err = UpsertChunksToChroma(r.Context(), "my_collection", chunks, embeds)
+	if err != nil {
+		log.Printf("chroma upsert error: %v", err)
+	}
+
 	fmt.Println(embeds)
 	// Next step (later): upsert {id, document, embedding, metadata} into ChromaDB.
 
