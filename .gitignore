@@ -1,0 +1,41 @@
+# --- OS / Editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Go build artifacts ---
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+coverage/
+*.coverprofile
+
+# --- Environment files ---
+# Keep a sanitized .env.example in repo; ignore real secrets.
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.development.local
+
+ .env
+
+# --- App data ---
+data/
+chroma-data/
+.chroma/
+tmp/
+*.log
+
+# --- Containers ---
+*.pid
