@@ -20,37 +20,45 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Prompt endpoint not yet implemented"})
 }
 
-func rechunkHandler(w http.ResponseWriter, r *http.Request) {
+func getFileContents(w http.ResponseWriter, r *http.Request) (string, string) {
 	defer r.Body.Close()
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
+		return "", ""
 	}
 
 	var reChunkFile string
 	if err := json.Unmarshal(b, &reChunkFile); err != nil {
 		http.Error(w, "error body text not a string", http.StatusBadRequest)
-		return
+		return "", ""
 	}
 
 	f, err := os.Open(reChunkFile)
 	if err != nil {
 		http.Error(w, "failed to open file", http.StatusNotFound)
 		fmt.Println("err here: ", err.Error())
-		return
+		return "", ""
 	}
 	defer f.Close()
 
 	contentBytes, err := io.ReadAll(f)
 	if err != nil {
 		http.Error(w, "failed to read file", http.StatusInternalServerError)
-		return
+		return "", ""
 	}
 	contentStr := string(contentBytes)
+	return contentStr, reChunkFile
+}
+
+func rechunkHandler(w http.ResponseWriter, r *http.Request) {
+	contentStr, fileName := getFileContents(w, r)
+	if contentStr == "" {
+		return
+	}
 
 	// chunk the content of the file
-	chunks := simpleChunkDocument(reChunkFile, contentStr, 2)
+	chunks := simpleChunkDocument(fileName, contentStr, 2)
 	fmt.Println(chunks)
 
 	result := struct {
