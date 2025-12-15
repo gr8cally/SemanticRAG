@@ -6,115 +6,47 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	chroma "github.com/amikos-tech/chroma-go/pkg/api/v2"
 )
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	contentStr, fileName := getFileContents(w, r)
-	if contentStr == "" {
-		return
-	}
-
-	// chunk the content of the file
-	chunks := simpleChunkDocument(fileName, contentStr, 2)
-
-	// embed
-	ctx := r.Context()
-	embedder, err := NewEmbedderFromEnv()
-	if err != nil {
-		http.Error(w, "failed to NewEmbedderFromEnv", http.StatusInternalServerError)
-		return
-	}
-
-	embeds, err := embedder.Embed(ctx, chunks)
-	if err != nil {
-		if err != nil {
-			http.Error(w, "failed to Embed chunks", http.StatusInternalServerError)
-			return
-		} /* handle */
-	}
-
-	err = UpsertChunksToChroma(r.Context(), "my_collection", chunks, embeds)
-	if err != nil {
-		log.Printf("chroma upsert error: %v", err)
-	}
-
-	fmt.Println(embeds)
-	// Next step (later): upsert {id, document, embedding, metadata} into ChromaDB.
-
-}
-
-func promptHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: implement prompt handling
-	json.NewEncoder(w).Encode(map[string]string{"message": "Prompt endpoint not yet implemented"})
-}
-
-func getFileContents(w http.ResponseWriter, r *http.Request) (string, string) {
-	defer r.Body.Close()
-	b, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return "", ""
-	}
-
-	var reChunkFile string
-	if err := json.Unmarshal(b, &reChunkFile); err != nil {
-		http.Error(w, "error body text not a string", http.StatusBadRequest)
-		return "", ""
-	}
-
-	f, err := os.Open(reChunkFile)
-	if err != nil {
-		http.Error(w, "failed to open file", http.StatusNotFound)
-		fmt.Println("err here: ", err.Error())
-		return "", ""
-	}
-	defer f.Close()
-
-	contentBytes, err := io.ReadAll(f)
-	if err != nil {
-		http.Error(w, "failed to read file", http.StatusInternalServerError)
-		return "", ""
-	}
-	contentStr := string(contentBytes)
-	return contentStr, reChunkFile
-}
-
-func rechunkHandler(w http.ResponseWriter, r *http.Request) {
-	contentStr, fileName := getFileContents(w, r)
-	if contentStr == "" {
-		return
-	}
-
-	// chunk the content of the file
-	chunks := simpleChunkDocument(fileName, contentStr, 2)
-
-	result := struct {
-		Chunks []Chunk
-	}{
-		chunks,
-	}
-
-	resStr, err := json.Marshal(result)
-	if err != nil {
-		http.Error(w, "failed to marshall response", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(resStr)
-}
-
+// source ./chroma/bin/activate
+// chroma run --path ./chroma-data --host 0.0.0.0 --port 8000
 func main() {
 	var err error
 	currentConfig, err = Load()
 	if err != nil {
+		return
+	}
+
+	chromaClient, err := chroma.NewHTTPClient()
+	if err != nil {
+		log.Fatalf("Error creating client: %s \n", err)
+		return
+	}
+
+	defer func() {
+		err = chromaClient.Close()
+		if err != nil {
+			log.Fatalf("Error closing client: %s \n", err)
+		}
+	}()
+
+	collection, err = chromaClient.GetOrCreateCollection(context.Background(), "col1",
+		chroma.WithCollectionMetadataCreate(
+			chroma.NewMetadata(
+				chroma.NewStringAttribute("source", "uploadHandler"),
+			),
+		),
+	)
+	if err != nil {
+		log.Fatalf("Error creating collection: %s \n", err)
 		return
 	}
 
@@ -403,6 +335,7 @@ type Config struct {
 }
 
 var currentConfig Config
+var collection chroma.Collection
 
 // Load loads .env-style files then reads process env.
 // In production, prefer real environment variables and skip files.
