@@ -30,7 +30,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	//	http.Error(w, "failed to NewEmbedderFromEnv", http.StatusInternalServerError)
 	//	return
 	//}
-
+	//
 	//embeds, err := embedder.Embed(ctx, chunks)
 	//if err != nil {
 	//	if err != nil {
@@ -39,7 +39,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	//	} /* handle */
 	//}
 
-	embeds := map[string][]float32{"Hello": []float32{0.101, 1.1, 1.2}}
+	embeds := map[string][]float32{"testFile.txt-0": []float32{0.101, 1.1, 1.2}}
 
 	// ... you already have: chunks []Chunk and embeds map[string][]float32
 	// chunks[i].ID must correspond to embeds[chunks[i].ID]
@@ -67,10 +67,22 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 			chroma.NewStringAttribute("doc_id", c.ID),
 			chroma.NewIntAttribute("len", int64(len(c.Text))),
 		))
+
+		break
 	}
 
 	// 3) Add to Chroma using IDs + Embeddings
 	//    All slice lengths must match; otherwise the client will return a validation error.
+
+	var err error
+	collection, err = chromaClient.GetOrCreateCollection(context.Background(), "col1",
+		chroma.WithCollectionMetadataCreate(
+			chroma.NewMetadata(
+				chroma.NewStringAttribute("source", "uploadHandler"),
+			),
+		),
+	)
+
 	if err := collection.Add(ctx,
 		chroma.WithIDs(ids...),
 		chroma.WithEmbeddings(embs...),
@@ -79,9 +91,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to add to chroma: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK: upserted " + strconv.Itoa(len(ids)) + " chunks"))
 
 	fmt.Println(embeds)
 	// Next step (later): upsert {id, document, embedding, metadata} into ChromaDB.
@@ -93,6 +102,8 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Printf("Count collection: %d\n", count)
 
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK: upserted " + strconv.Itoa(len(ids)) + " chunks"))
 }
 
 func promptHandler(w http.ResponseWriter, r *http.Request) {
