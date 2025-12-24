@@ -12,7 +12,7 @@ type GeminiLLM struct {
 }
 
 func NewGeminiLLMFromEnv(ctx context.Context, apiKey string) (*GeminiLLM, error) {
-	model := "Gemini Flash 2.5 LLM"
+	model := "gemini-2.5-flash"
 
 	c, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey:  apiKey,

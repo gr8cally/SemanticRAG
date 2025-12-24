@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -37,15 +35,8 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "failed to Embed chunks", http.StatusInternalServerError)
 			return
-		} /* handle */
+		}
 	}
-
-	//embeds := map[string][]float32{"testFile.txt-0": []float32{0.101, 1.1, 1.2}}
-
-	// ... you already have: chunks []Chunk and embeds map[string][]float32
-	// chunks[i].ID must correspond to embeds[chunks[i].ID]
-
-	//ctx := r.Context()
 
 	// 2) Build aligned slices: ids and embeddings
 	ids := make([]chroma.DocumentID, 0, len(chunks))
@@ -74,15 +65,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// 3) Add to Chroma using IDs + Embeddings
 	//    All slice lengths must match; otherwise the client will return a validation error.
 
-	//var err error
-	collection, err = chromaClient.GetOrCreateCollection(context.Background(), "col1",
-		chroma.WithCollectionMetadataCreate(
-			chroma.NewMetadata(
-				chroma.NewStringAttribute("source", "uploadHandler"),
-			),
-		),
-	)
-
 	err = collection.Add(ctx,
 		chroma.WithIDs(ids...),
 		chroma.WithEmbeddings(embs...),
@@ -94,7 +76,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := collection.Count(context.Background())
+	count, err := collection.Count(ctx)
 	if err != nil {
 		log.Fatalf("Error counting collection: %s \n", err)
 		return
@@ -105,39 +87,8 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK: upserted " + strconv.Itoa(len(ids)) + " chunks"))
 }
 
-//func promptHandler(w http.ResponseWriter, r *http.Request) {
-//	defer r.Body.Close()
-//	b, err := io.ReadAll(r.Body)
-//	if err != nil {
-//		http.Error(w, "failed to read body", http.StatusBadRequest)
-//		return
-//	}
-//
-//	var prompt string
-//	if err := json.Unmarshal(b, &prompt); err != nil {
-//		http.Error(w, "error body text not a string", http.StatusBadRequest)
-//		return
-//	}
-//
-//	if prompt == "" {
-//		http.Error(w, "error body text not a string", http.StatusBadRequest)
-//	}
-//
-//	qr, err := collection.Query(context.Background(), chroma.WithQueryTexts(prompt))
-//	if err != nil {
-//		log.Fatalf("Error querying collection: %s \n", err)
-//		return
-//	}
-//
-//	x := qr.GetDocumentsGroups()[0][0]
-//	fmt.Printf("Query result: %v\n", x)
-//
-//	json.NewEncoder(w).Encode(map[string]string{"message": "Prompt endpoint not yet implemented"})
-//}
-
 type ChatRequest struct {
-	Context string `json:"context"`
-	Query   string `json:"query"`
+	Query string `json:"query"`
 }
 
 type ChatResponse struct {
@@ -146,8 +97,7 @@ type ChatResponse struct {
 }
 
 var (
-	geminiLLM *GeminiLLM // init once at startup
-	// embedder NewEmbedderFromEnv() etc...
+	geminiLLM *GeminiLLM
 )
 
 func readChatRequest(r *http.Request) (ChatRequest, error) {
@@ -171,8 +121,7 @@ func readChatRequest(r *http.Request) (ChatRequest, error) {
 	_ = r.ParseForm()
 
 	return ChatRequest{
-		Context: r.FormValue("context"),
-		Query:   r.FormValue("query"),
+		Query: r.FormValue("query"),
 	}, nil
 }
 
@@ -181,7 +130,7 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	req, err := readChatRequest(r)
-	if err != nil || req.Query == "" || req.Context == "" {
+	if err != nil || req.Query == "" {
 		http.Error(w, "expected {context, query}", http.StatusBadRequest)
 		return
 	}
@@ -211,7 +160,6 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 	qr, err := collection.Query(ctx,
 		chroma.WithQueryEmbeddings(embeddings.NewEmbeddingFromFloat32(qVec)),
 		chroma.WithNResults(5),
-		chroma.WithWhereQuery(chroma.EqString("context", req.Context)), //
 		chroma.WithIncludeQuery(chroma.IncludeDocuments, chroma.IncludeMetadatas),
 	)
 	if err != nil {
@@ -254,34 +202,45 @@ func promptHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getFileContents(w http.ResponseWriter, r *http.Request) (string, string) {
-	defer r.Body.Close()
-	b, err := io.ReadAll(r.Body)
+	// 1. Parse the multipart form (32MB limit)
+	err := r.ParseMultipartForm(32 << 20)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		http.Error(w, "failed to parse multipart form", http.StatusBadRequest)
 		return "", ""
 	}
 
-	var reChunkFile string
-	if err := json.Unmarshal(b, &reChunkFile); err != nil {
-		http.Error(w, "error body text not a string", http.StatusBadRequest)
+	// 2. Access the "files" slice directly from the form
+	files := r.MultipartForm.File["files"]
+
+	// 3. Check if no files were provided
+	if len(files) == 0 {
+		http.Error(w, "no file provided in 'files' field", http.StatusBadRequest)
 		return "", ""
 	}
 
-	f, err := os.Open(reChunkFile)
-	if err != nil {
-		http.Error(w, "failed to open file", http.StatusNotFound)
-		fmt.Println("err here: ", err.Error())
+	// 4. Strict check: error if more than one file is uploaded
+	if len(files) > 1 {
+		http.Error(w, "multiple files not allowed; please upload exactly one file", http.StatusBadRequest)
 		return "", ""
 	}
-	defer f.Close()
 
-	contentBytes, err := io.ReadAll(f)
+	// 5. Open the single file
+	fileHeader := files[0]
+	file, err := fileHeader.Open()
 	if err != nil {
-		http.Error(w, "failed to read file", http.StatusInternalServerError)
+		http.Error(w, "failed to open file", http.StatusInternalServerError)
 		return "", ""
 	}
-	contentStr := string(contentBytes)
-	return contentStr, reChunkFile
+	defer file.Close()
+
+	// 6. Read content
+	contentBytes, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "failed to read file content", http.StatusInternalServerError)
+		return "", ""
+	}
+
+	return string(contentBytes), fileHeader.Filename
 }
 
 func rechunkHandler(w http.ResponseWriter, r *http.Request) {

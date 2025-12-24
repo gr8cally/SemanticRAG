@@ -2,17 +2,40 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	chroma "github.com/amikos-tech/chroma-go/pkg/api/v2"
 )
 
 var chromaClient chroma.Client
+
+func initChroma(baseURL string) error {
+	c, err := chroma.NewHTTPClient(
+		chroma.WithBaseURL(baseURL),
+	)
+	if err != nil {
+		return fmt.Errorf("creating Chroma client: %w", err)
+	}
+	chromaClient = c
+	return nil
+}
+
+func initGeminiLLM(ctx context.Context, apiKey string) error {
+	gem, err := NewGeminiLLMFromEnv(ctx, apiKey)
+	if err != nil {
+		return fmt.Errorf("creating Gemini LLM: %w", err)
+	}
+
+	geminiLLM = gem
+	return nil
+}
 
 // source ./chroma/bin/activate
 // chroma run --path ./chroma-data --host 0.0.0.0 --port 8000
@@ -20,30 +43,43 @@ func main() {
 	var err error
 	currentConfig, err = Load()
 	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
 		return
 	}
 
-	chromaClient, err = chroma.NewHTTPClient()
+	err = initChroma(currentConfig.ChromaDBHost)
 	if err != nil {
-		log.Fatalf("Error creating client: %s \n", err)
+		log.Fatalf("failed to init chroma: %v", err)
 		return
 	}
-
 	defer func() {
-		err = chromaClient.Close()
-		if err != nil {
-			log.Fatalf("Error closing client: %s \n", err)
+		if err := chromaClient.Close(); err != nil {
+			log.Printf("Error closing Chroma client: %v", err)
 		}
 	}()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = initChromaCollection(ctx)
 	if err != nil {
-		log.Fatalf("Error creating collection: %s \n", err)
+		log.Fatalf("failed to init chroma collection: %v", err)
+		return
+	}
+
+	err = initGeminiLLM(ctx, currentConfig.GeminiAPIKey)
+	if err != nil {
+		log.Fatalf("failed to init gemini LLM: %v", err)
 		return
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 	mux.HandleFunc("/upload", requirePost(uploadHandler))   // POST
-	mux.HandleFunc("/prompt", requirePost(promptHandler))   // POST
+	mux.HandleFunc("/chat", requirePost(promptHandler))     // POST
 	mux.HandleFunc("/rechunk", requirePost(rechunkHandler)) // POST
 
 	log.Fatal(http.ListenAndServe(":8081", mux))
@@ -107,9 +143,6 @@ func simpleChunkDocument(docID, text string, sentencesPerChunk int) []Chunk {
 	return chunks
 }
 
-//------
-//loading env var
-
 type Config struct {
 	HFAPIKey       string // HF_API_KEY (required)
 	EmbedModelName string // EMBED_MODEL_NAME
@@ -123,6 +156,15 @@ type Config struct {
 
 var currentConfig Config
 var collection chroma.Collection
+
+func initChromaCollection(ctx context.Context) error {
+	c, err := chromaClient.GetOrCreateCollection(ctx, "rag_demo")
+	if err != nil {
+		return fmt.Errorf("GetOrCreateCollection failed: %w", err)
+	}
+	collection = c
+	return nil
+}
 
 // Load loads .env-style files then reads process env.
 // In production, prefer real environment variables and skip files.

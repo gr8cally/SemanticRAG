@@ -48,12 +48,12 @@ func NewEmbedderFromEnv() (Embedder, error) {
 
 	return &hfEmbedder{
 		client:    &http.Client{Timeout: 60 * time.Second},
-		token:     currentConfig.HFAPIKey, // HF_API_KEY
-		model:     model,                  // EMBED_MODEL_NAME
+		token:     currentConfig.HFAPIKey,
+		model:     model,
 		pooling:   "mean",
 		normalize: true,
 		wait:      true,
-		batch:     64, // fixed default; adjust if you later add a config field
+		batch:     64,
 	}, nil
 }
 
