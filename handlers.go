@@ -14,29 +14,47 @@ import (
 )
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	contentStr, fileName := getFileContents(w, r)
-	if contentStr == "" {
-		return
-	}
+    contentStr, fileName := getFileContents(w, r)
+    if contentStr == "" {
+        return
+    }
 
-	// chunk the content of the file
-	chunks := simpleChunkDocument(fileName, contentStr, 2)
+    // chunk the content of the file
+    chunks := simpleChunkDocument(fileName, contentStr, 2)
 
-	// embed
-	ctx := r.Context()
-	embedder, err := NewEmbedderFromEnv()
-	if err != nil {
-		http.Error(w, "failed to NewEmbedderFromEnv", http.StatusInternalServerError)
-		return
-	}
+    // embed
+    ctx := r.Context()
+    embedder, err := NewEmbedderFromEnv()
+    if err != nil {
+        http.Error(w, "failed to NewEmbedderFromEnv", http.StatusInternalServerError)
+        return
+    }
 
-	embeds, err := embedder.Embed(ctx, chunks)
-	if err != nil {
-		if err != nil {
-			http.Error(w, "failed to Embed chunks", http.StatusInternalServerError)
-			return
-		}
-	}
+    // Determine model name if available from embedder implementation
+    modelName := ""
+    if h, ok := embedder.(*hfEmbedder); ok {
+        modelName = h.model
+    }
+
+    embeds, err := embedWithCache(ctx, embedder, chunks, fileName, contentStr, 2, modelName)
+    if err != nil {
+        // Map cache errors to appropriate HTTP codes
+        msg := err.Error()
+        if strings.HasPrefix(msg, "failed to load embeddings cache") {
+            http.Error(w, msg, http.StatusInternalServerError)
+            return
+        }
+        if strings.HasPrefix(msg, "no matching cached embeddings found") {
+            http.Error(w, msg, http.StatusBadRequest)
+            return
+        }
+        if strings.Contains(msg, "cache") {
+            http.Error(w, "embedding/cache failed: "+msg, http.StatusInternalServerError)
+            return
+        }
+        http.Error(w, "failed to Embed chunks", http.StatusInternalServerError)
+        return
+    }
 
 	// 2) Build aligned slices: ids and embeddings
 	ids := make([]chroma.DocumentID, 0, len(chunks))

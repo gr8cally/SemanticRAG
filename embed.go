@@ -106,6 +106,8 @@ func (h *hfEmbedder) Embed(ctx context.Context, chunks []Chunk) (map[string][]fl
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+h.token)
 
+		fmt.Println("embed request", time.Now())
+
 		resp, err := h.client.Do(req)
 		if err != nil {
 			return nil, err
