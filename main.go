@@ -27,8 +27,8 @@ func initChroma(baseURL string) error {
 	return nil
 }
 
-func initGeminiLLM(ctx context.Context, apiKey string) error {
-	gem, err := NewGeminiLLMFromEnv(ctx, apiKey)
+func initGeminiLLM(ctx context.Context, apiKey, model string) error {
+	gem, err := NewGeminiLLMFromEnv(ctx, apiKey, model)
 	if err != nil {
 		return fmt.Errorf("creating Gemini LLM: %w", err)
 	}
@@ -67,7 +67,7 @@ func main() {
 		return
 	}
 
-	err = initGeminiLLM(ctx, currentConfig.GeminiAPIKey)
+	err = initGeminiLLM(ctx, currentConfig.GeminiAPIKey, currentConfig.LLMModelName)
 	if err != nil {
 		log.Fatalf("failed to init gemini LLM: %v", err)
 		return
@@ -75,6 +75,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		log.Println("Health check request received")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
@@ -82,7 +83,7 @@ func main() {
 	mux.HandleFunc("/chat", requirePost(promptHandler))     // POST
 	mux.HandleFunc("/rechunk", requirePost(rechunkHandler)) // POST
 
-	log.Fatal(http.ListenAndServe(":8081", mux))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", currentConfig.Port), mux))
 }
 
 func requirePost(h http.HandlerFunc) http.HandlerFunc {

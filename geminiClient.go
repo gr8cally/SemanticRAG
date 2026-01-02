@@ -11,9 +11,7 @@ type GeminiLLM struct {
 	model  string
 }
 
-func NewGeminiLLMFromEnv(ctx context.Context, apiKey string) (*GeminiLLM, error) {
-	model := "gemini-2.5-flash"
-
+func NewGeminiLLMFromEnv(ctx context.Context, apiKey, model string) (*GeminiLLM, error) {
 	c, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey:  apiKey,
 		Backend: genai.BackendGeminiAPI,
