@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -262,7 +263,17 @@ func getFileContents(w http.ResponseWriter, r *http.Request) (string, string) {
 		return "", ""
 	}
 
-	return string(contentBytes), fileHeader.Filename
+	var text string
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	switch ext {
+	case ".txt", ".md":
+		text = string(contentBytes)
+	default:
+		http.Error(w, "unsupported file type for now; please upload .txt or .md", http.StatusBadRequest)
+		return "", ""
+	}
+
+	return text, fileHeader.Filename
 }
 
 func rechunkHandler(w http.ResponseWriter, r *http.Request) {
